@@ -20,13 +20,6 @@
     // Do any additional setup after loading the view.
     self.recorder = [[AudioRecorder alloc] init];
     
-    AVCaptureDeviceType deviceType = AVCaptureDeviceTypeMicrophone;
-    AVCaptureDeviceDiscoverySession *session = [AVCaptureDeviceDiscoverySession discoverySessionWithDeviceTypes:@[deviceType] mediaType:AVMediaTypeAudio position:AVCaptureDevicePositionUnspecified];
-    for (AVCaptureDevice *device in session.devices) {
-        NSLog(@"%@ manufacturer: %@", device.localizedName, device.manufacturer);
-    }
-    AVCaptureDevice *audioDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
-    NSLog(@"default device name: %@, manufacturer: %@", audioDevice.localizedName, audioDevice.manufacturer);
 }
 
 
