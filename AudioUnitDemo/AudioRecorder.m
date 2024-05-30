@@ -20,12 +20,24 @@
 @property (nonatomic, strong) AVAudioPCMBuffer *sourceBuffer;
 @property (nonatomic, strong) NSThread *thread;
 @property (nonatomic, assign) BOOL isRecording;
+@property (nonatomic, strong) AVAudioRecorder *audioRecorder;
 @end
 
 @implementation AudioRecorder
 
+float kDefaultSampleRate = 48000.0;
+NSInteger kDefaultchannelCount = 1;
+NSInteger kDefaultBitDepth = 16;
+AVAudioCommonFormat kDefaultFormat = AVAudioPCMFormatInt16;
 
 - (void)startRecording {
+    [self useAudioRecorder];
+//    [self useCaptureSession];
+    
+    self.isRecording = YES;
+}
+
+- (void)useCaptureSession {
     self.captureSession = [[AVCaptureSession alloc] init];
         
     AVCaptureDevice *audioDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
@@ -35,7 +47,8 @@
     [self.captureSession addInput:audioDeviceInput];
 
     self.audioDataOutput = [[AVCaptureAudioDataOutput alloc] init];
-    [self.audioDataOutput setSampleBufferDelegate:self queue:dispatch_get_main_queue()];
+    dispatch_queue_t audioOutputQueue = dispatch_queue_create("com.cvte.maxhubshare.ultrasound.audiocapture", DISPATCH_QUEUE_SERIAL);
+    [self.audioDataOutput setSampleBufferDelegate:self queue:audioOutputQueue];
     [self.captureSession addOutput:self.audioDataOutput];
 
     [self.captureSession commitConfiguration];
@@ -43,10 +56,39 @@
     
     [self createAssetWriter];
     
-    [self createFile];
-    
+    // 文件写入类型的使用这个方法来读取PCM
+//    [self createFile];
 //    [self createThread];
+}
+
+- (void)useAudioRecorder {
+    NSString *filePath = [self writePath];
+    NSURL *fileURL = [NSURL fileURLWithPath:filePath];
+
+    AudioChannelLayout channelLayout;
+    memset(&channelLayout, 0, sizeof(AudioChannelLayout));
+    channelLayout.mChannelLayoutTag = kAudioChannelLayoutTag_Mono;
+    NSDictionary *settings = @{
+        AVFormatIDKey: @(kAudioFormatLinearPCM),
+        AVNumberOfChannelsKey: @(kDefaultchannelCount),
+        AVSampleRateKey: @(kDefaultSampleRate),
+        AVChannelLayoutKey: [NSData dataWithBytes:&channelLayout length:sizeof(AudioChannelLayout)],
+        AVLinearPCMBitDepthKey: @(kDefaultBitDepth),
+        AVLinearPCMIsFloatKey: @(NO),
+        AVLinearPCMIsBigEndianKey: @(NO),
+        AVLinearPCMIsNonInterleaved: @(NO)
+    };
+    NSError *error = nil;
+    self.audioRecorder = [[AVAudioRecorder alloc] initWithURL:fileURL settings:settings error:&error];
+    if (error) {
+        NSLog(@"Error to create audio recorder, %@", error.localizedDescription);
+        return;
+    }
+    [self.audioRecorder prepareToRecord];
+    [self.audioRecorder record];
+    [self createFile];
     self.isRecording = YES;
+    [self createThread];
 }
 
 - (void)createFile {
@@ -59,9 +101,7 @@
 }
 
 - (NSString *)writePath {
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDownloadsDirectory, NSUserDomainMask, YES);
-    NSString *downloadsDirectory = [paths objectAtIndex:0];
-    NSString *path = [downloadsDirectory stringByAppendingPathComponent:@"output.pcm"];
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"output.pcm"];
     NSLog(@"path : %@", path);
     return path;
 }
@@ -103,41 +143,34 @@
 
 - (void)readLoop {
     NSString *rewritePath = [[[self writePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"output1.pcm"];
-    FILE *file = fopen([rewritePath UTF8String], "wb+");
-    if (!file) {
+    NSFileHandle *rewriteFileHandle = [NSFileHandle fileHandleForWritingAtPath:rewritePath];
+    if (!rewriteFileHandle) {
         NSLog(@"Could not open file for rewriting");
         return;
     }
     
-    long lastReadPosition = 0;
+    long threshold = 1024 * 1024;
     while (self.isRecording) {
-        fseek(_file, 0, SEEK_END);
-        long fileSize = ftell(_file);
-        NSLog(@"fileSize = %ld", fileSize);
-        if (fileSize > lastReadPosition) {
-            fseek(_file, lastReadPosition, SEEK_SET);
-            long newBytes = fileSize - lastReadPosition;
-            void *buffer = malloc(newBytes);
-            fread(buffer, newBytes, 1, _file);
+        NSFileHandle *readFileHandle = [NSFileHandle fileHandleForReadingAtPath:[self writePath]];
+        NSData *fileData = [readFileHandle readDataToEndOfFile];
+        long fileSize = [fileData length];
+        if (fileSize > threshold) {
+            NSData *dataToProcess = [fileData subdataWithRange:NSMakeRange(0, fileSize)];
             // Process the new data...
-            NSLog(@"newBytes = %ld", newBytes);
             // 重新写入到文件中
-            fwrite(buffer, newBytes, 1, file);
-            
-            free(buffer);
-            ftruncate(fileno(_file), 0); // 清空文件
-//            lastReadPosition = fileSize;
-            lastReadPosition = 0;
+            [rewriteFileHandle writeData:dataToProcess];
+            [readFileHandle truncateFileAtOffset:0]; // 清空文件
         }
         [NSThread sleepForTimeInterval:0.1];  // Adjust this value as needed
     }
-    fclose(file);
+    [rewriteFileHandle closeFile];
 }
 
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-    // TODO:
-    [self resample:sampleBuffer];
+    // 使用assetWriter写入文件
 //    [self useAssetWriter:sampleBuffer];
+    // 冲采样并写入文件
+    [self resample:sampleBuffer];
 }
 
 - (void)useAssetWriter:(CMSampleBufferRef)sampleBuffer {
@@ -170,7 +203,7 @@
     const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription);
     if (!_converter) {
         AVAudioFormat *sourceFormat = [[AVAudioFormat alloc] initWithStreamDescription:asbd];
-        AVAudioFormat *destinationFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatInt16 sampleRate:48000 channels:1 interleaved:NO];
+        AVAudioFormat *destinationFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatInt16 sampleRate:kDefaultSampleRate channels:kDefaultchannelCount interleaved:NO];
         _converter = [[AVAudioConverter alloc] initFromFormat:sourceFormat toFormat:destinationFormat];
         if (_converter == nil) {
             NSLog(@"[Error] rror to create audio converter");
@@ -178,7 +211,7 @@
             return;
         }
     }
-    
+
     _sourceBuffer = [self toAudioPcmBuffer:sampleBuffer];
     // calculate sourceBuffer data size
     const AudioBufferList *bufferList = _sourceBuffer.audioBufferList;
@@ -194,7 +227,7 @@
         return;
     }
     NSError *error = nil;
-    
+
     AudioRecorder* __weak weakSelf = self;
     AVAudioConverterOutputStatus status = [self.converter convertToBuffer:destBuffer error:&error withInputFromBlock:^AVAudioBuffer * _Nullable(AVAudioPacketCount count, AVAudioConverterInputStatus * _Nonnull outStatus) {
         AudioRecorder* __strong strongSelf = weakSelf;
@@ -211,16 +244,33 @@
         [self stopRecording];
         return;
     }
-    
     // 拿到dest buffer
     int8_t *destAudioBuffer = (int8_t *)destBuffer.audioBufferList->mBuffers[0].mData;
     UInt32 destAudioBufferSizeInBytes = destBuffer.frameLength * destFormat.streamDescription->mBytesPerFrame;
     
     // 传入上层
     // 写入到本地文件
-    if (_file) {
-        fwrite(destAudioBuffer, destAudioBufferSizeInBytes, 1, _file); // 在X86_64上崩溃
+    [self writeBufferToFile:destAudioBuffer size:destAudioBufferSizeInBytes];
+}
+
+- (void)writeBufferToFile:(int8_t *)buffer size:(UInt32)size {
+    // Convert buffer to NSData
+    NSData *data = [NSData dataWithBytes:buffer length:size];
+
+    // Get file path
+    NSString *filePath = [self writePath];
+
+    // Write data to file
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    if (![fileManager fileExistsAtPath:filePath]) {
+        // If file doesn't exist, create it first
+        [fileManager createFileAtPath:filePath contents:nil attributes:nil];
     }
+
+    // Append data to file
+    NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:filePath];
+    [fileHandle seekToEndOfFile];
+    [fileHandle writeData:data];
 }
 
 - (AVAudioPCMBuffer *)toAudioPcmBuffer:(CMSampleBufferRef)sampleBufferRef {
@@ -235,11 +285,16 @@
 
 
 - (void)stopRecording {
+    [self.audioRecorder stop];
+    [self.audioRecorder deleteRecording];
     [self.captureSession stopRunning];
     [self.assetWriterInput markAsFinished];
     [self.assetWriter finishWritingWithCompletionHandler:^{}];
     self.isRecording = NO;
     fclose(_file);
+    NSString *filePath = [self writePath];
+    NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:filePath];
+    [fileHandle closeFile];
 }
 
 
